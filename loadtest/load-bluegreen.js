@@ -19,7 +19,9 @@ export const options = {
   },
 };
 
-const PREVIEW_URL = __ENV.PREVIEW_URL || __ENV.BASE_URL || 'http://webserver-api01-preview.apps.svc.cluster.local:8000';
+// Fallback solo para corridas locales (make load-test-bluegreen).
+// El pipeline siempre pasa PREVIEW_URL como env var con el host real.
+const PREVIEW_URL = __ENV.PREVIEW_URL || __ENV.BASE_URL || 'http://webserver-api01-dev-preview.webserver-api01-dev.svc.cluster.local:8080';
 
 export default function () {
   const healthRes = http.get(`${PREVIEW_URL}/health`);
