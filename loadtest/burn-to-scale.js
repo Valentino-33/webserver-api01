@@ -1,17 +1,9 @@
-// burn-to-scale.js — usado por el burn pipeline (`pythonapps-burn-pipeline`)
-// para validar que el HPA escala al cruzar el target de CPU.
+// burn-to-scale.js — pipeline DEDICADO (pythonapps-burn-pipeline) para
+// validar HPA scale-up. Stress real — no contiene thresholds, el éxito
+// lo decide el step kubectl monitor-hpa del Task (replicas > baseline).
 //
-// NO valida latencia ni errores — eso es el load test del release pipeline.
-// Acá la única dimensión que importa es "¿se gatilla scale-up?". El
-// éxito/falla lo decide el step kubectl monitor-hpa del Task, NO los
-// thresholds de k6.
-//
-// Estrategia de carga:
-//   - 200 VUs sostenidos sin sleep → push máximo de CPU contra el pod
-//   - Duración suficiente para que HPA evalúe (default ~15s resync,
-//     scale-up necesita ~30s de averageUtilization > target)
-//   - Endpoint /api01/hello con poco trabajo pero suficiente para saturar
-//     uvicorn cuando hay miles de requests/s contra los pods.
+// Profile agresivo: 400 VUs sin sleep durante 150s. Suficiente para
+// saturar 600m CPU baseline y forzar HPA scale-up (target 50%).
 import http from 'k6/http';
 
 export const options = {
@@ -20,21 +12,18 @@ export const options = {
       executor: 'ramping-vus',
       startVUs: 0,
       stages: [
-        { duration: '15s', target: 200 },   // ramp rápido
-        { duration: '120s', target: 200 },  // sustained — HPA escala
+        { duration: '15s', target: 400 },   // ramp rápido — saturación inmediata
+        { duration: '150s', target: 400 },  // sustained — HPA escala ~30-60s después
         { duration: '15s', target: 0 },
       ],
       gracefulRampDown: '5s',
     },
   },
-  // Sin thresholds: este test mide CAPACIDAD, no latencia.
   thresholds: {},
 };
 
 const TARGET_URL = __ENV.TARGET_URL || 'http://api01.localhost:8888';
 
 export default function () {
-  // /api01/hello hace JSON render — más caro que /health, satura CPU más rápido.
   http.get(`${TARGET_URL}/api01/hello`);
-  // Sin sleep — generar la mayor presión de CPU posible.
 }
