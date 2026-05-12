@@ -1,3 +1,6 @@
+// smoke.js — sanity check rápido contra /api01/health + /api01/version.
+// Lo usa el rollingupdate strategy (si la app cambiara) o corridas locales
+// `make load-test-smoke APP=webserver-api01`.
 import http from 'k6/http';
 import { check, sleep } from 'k6';
 import { Rate } from 'k6/metrics';
@@ -12,19 +15,24 @@ export const options = {
   ],
   thresholds: {
     http_req_duration: ['p(95)<500'],
-    errors: ['rate<0.01'],
+    errors:            ['rate<0.01'],
   },
 };
 
-// Fallback solo para corridas locales. El pipeline pasa BASE_URL via env var.
-const BASE_URL = __ENV.BASE_URL || 'http://webserver-api01-dev-stable.webserver-api01-dev.svc.cluster.local:8080';
+// Fallback para corridas locales. El pipeline pasa BASE_URL via env var.
+const BASE_URL = __ENV.BASE_URL || 'http://api01.localhost:8888';
 
 export default function () {
-  const res = http.get(`${BASE_URL}/health`);
-  const ok = check(res, {
-    'status 200': (r) => r.status === 200,
-    'body healthy': (r) => JSON.parse(r.body).status === 'healthy',
+  const healthRes = http.get(`${BASE_URL}/api01/health`);
+  const healthOk = check(healthRes, {
+    'health 200': (r) => r.status === 200,
+    'body healthy': (r) => {
+      try { return JSON.parse(r.body).status === 'healthy'; } catch { return false; }
+    },
   });
-  errorRate.add(!ok);
+  errorRate.add(!healthOk);
+
+  const versionRes = http.get(`${BASE_URL}/api01/version`);
+  check(versionRes, { 'version 200': (r) => r.status === 200 });
   sleep(1);
 }

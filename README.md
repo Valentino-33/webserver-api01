@@ -2,14 +2,17 @@
 
 API Python (FastAPI) con estrategia de deployment **Blue/Green** vía Argo Rollouts.
 
+**Todos los endpoints viven bajo `/api01/*`** — la raíz `/` NO responde nada. Los probes (liveness/readiness) apuntan a `/api01/health`.
+
 ## Endpoints
 
 | Método | Path | Descripción |
 |---|---|---|
-| GET | `/` | Info del servicio y versión |
-| GET | `/health` | Health check (liveness/readiness probe de k8s) |
-| GET | `/version` | Versión actual |
+| GET | `/api01/` | Landing — info del servicio, version, strategy |
+| GET | `/api01/health` | Health check (liveness/readiness probe de k8s) |
+| GET | `/api01/version` | Versión actual |
 | GET | `/api01/hello` | Endpoint de negocio (lo que prueban los load tests) |
+| GET | `/api01/info` | Metadata extra: uptime, log level |
 | GET | `/api01/metrics` | Métricas Prometheus (scrapeadas vía ServiceMonitor) |
 
 ## Correr local
@@ -17,7 +20,8 @@ API Python (FastAPI) con estrategia de deployment **Blue/Green** vía Argo Rollo
 ```bash
 pip install -e .
 uvicorn app.main:app --reload --port 8000
-curl localhost:8000/health
+curl localhost:8000/api01/health
+curl localhost:8000/api01/hello
 ```
 
 ## Docker
@@ -33,7 +37,7 @@ Los logs salen a stdout en **JSON** vía `structlog` (config: `app/logging_confi
 Cada línea es un evento parseable:
 
 ```json
-{"event":"request","method":"GET","path":"/health","status":200,"level":"info","timestamp":"2026-05-12T12:34:56Z"}
+{"event":"request","method":"GET","path":"/api01/health","status":200,"version":"v0.5.0","level":"info","timestamp":"2026-05-12T12:34:56Z"}
 ```
 
 Fluent-bit los ingesta a Elasticsearch y aparecen en Kibana bajo `kubernetes.namespace_name : "webserver-api01-dev"`.

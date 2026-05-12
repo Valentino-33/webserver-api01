@@ -1,21 +1,24 @@
-// load-bluegreen.js — Stage 5 del pipeline para webserver-api01.
+// load-bluegreen.js — Stage 5 del release pipeline para webserver-api01.
 //
-// Apunta SIEMPRE al preview service (la versión green, aún sin tráfico real).
-// El pipeline pasa PREVIEW_URL como env var; el fallback solo es para corridas
-// locales con `make load-test-bluegreen`.
+// Apunta SIEMPRE al PREVIEW service (la versión green, sin tráfico real
+// todavía). El pipeline pasa PREVIEW_URL como env var; el fallback es solo
+// para corridas locales con `make load-test-bluegreen`.
 //
 // Por qué preview y no stable:
-//   En blue/green la nueva versión vive en preview hasta que pasamos el switch.
-//   Validar contra stable sería testear la versión vieja → no aporta nada.
-//   El svc preview enrutea 100% al green RS hasta promote.
+//   En blue/green la nueva versión vive en preview hasta el switch. Validar
+//   contra stable testearía la versión vieja → no aporta. El svc preview
+//   enrutea 100% al green RS hasta promote.
 //
 // Ramp profile:
 //   warmup → carga progresiva hasta 1000 VUs → cool-down. Cada etapa con
-//   duración suficiente para que stats de p95/p99 sean estables.
+//   duración suficiente para que stats de p95/p99 sean estables y para que
+//   HPA tenga tiempo de escalar si hace falta.
 //
-// Thresholds laxos (cluster k3d local con limit 300m CPU/pod):
-//   Permiten saturación temporal — solo fallamos en regresiones reales
-//   (errores 5xx, latencias absurdas), no por capacidad del cluster.
+// Thresholds:
+//   El cluster k3d local tiene apps con limit 300m CPU; con minReplicas=2
+//   en values.yaml arrancamos con baseline de 600m. Aún así 1000 VUs es
+//   agresivo — el threshold de errores acepta 10% (HPA tarda ~30s en
+//   reaccionar; durante esa ventana algunos requests pueden fallar).
 import http from 'k6/http';
 import { check, sleep } from 'k6';
 import { Rate, Trend, Counter } from 'k6/metrics';
@@ -30,10 +33,10 @@ export const options = {
       executor: 'ramping-vus',
       startVUs: 0,
       stages: [
-        { duration: '20s', target: 50 },    // warmup
-        { duration: '30s', target: 200 },   // ramp medio
-        { duration: '30s', target: 500 },   // ramp alto
-        { duration: '60s', target: 1000 },  // peak sostenido
+        { duration: '30s', target: 100 },   // warmup, da tiempo a probes
+        { duration: '30s', target: 300 },   // ramp medio, HPA debería notar
+        { duration: '30s', target: 600 },   // ramp alto, HPA escala
+        { duration: '60s', target: 1000 },  // peak — sostenido
         { duration: '30s', target: 1000 },  // mantener peak
         { duration: '20s', target: 0 },     // cool-down
       ],
@@ -41,31 +44,30 @@ export const options = {
     },
   },
   thresholds: {
-    // Laxos a propósito: k3d local con limit 300m no aguanta thresholds de prod.
-    // En cluster con capacidad real, bajar a p95<800 / p99<1500.
+    // Laxos a propósito para k3d (limit 300m CPU/pod, max 5 replicas).
+    // En cluster con capacidad real, bajar a p95<800 / p99<1500 / errors<1%.
     http_req_duration: ['p(95)<2000', 'p(99)<3000'],
-    http_req_failed:   ['rate<0.05'],
-    errors:            ['rate<0.05'],
-    // El green DEBE servir la versión esperada — si no aparece, fail hard.
+    http_req_failed:   ['rate<0.10'],   // 10% — ventana de ~30s mientras HPA escala
+    errors:            ['rate<0.10'],
+    // El green DEBE servir la versión esperada — si todos responses traen
+    // versión distinta, algo anda mal con el preview svc o el bump-gitops.
     version_mismatch:  ['count<1'],
   },
 };
 
-// PREVIEW_URL lo inyecta el Tekton task (preview service in-cluster).
+// PREVIEW_URL lo inyecta el Tekton task (preview svc in-cluster).
 // Fallback para `make load-test-bluegreen` desde host.
 const PREVIEW_URL = __ENV.PREVIEW_URL || 'http://preview-api01.localhost:8888';
-// EXPECTED_VERSION: opcional — si se pasa, todo response cuyo body.version
-// difiera marca version_mismatch (forzando fail del threshold).
 const EXPECTED_VERSION = __ENV.EXPECTED_VERSION || '';
 
 export default function () {
-  // 1. /health — barato, mide latencia de la app
-  const healthRes = http.get(`${PREVIEW_URL}/health`, { tags: { endpoint: 'health' } });
+  // 1. /api01/health — barato, mide latencia de la app y verifica liveness
+  const healthRes = http.get(`${PREVIEW_URL}/api01/health`, { tags: { endpoint: 'health' } });
   check(healthRes, { 'health 200': (r) => r.status === 200 });
   previewLatency.add(healthRes.timings.duration);
 
-  // 2. /api01/hello — endpoint de negocio; valida que el green responde y
-  //    reporta versión. Es el endpoint que un cliente real golpearía.
+  // 2. /api01/hello — endpoint de negocio; reporta versión. Es el endpoint
+  //    que un cliente real golpearía.
   const apiRes = http.get(`${PREVIEW_URL}/api01/hello`, { tags: { endpoint: 'hello' } });
   const ok = check(apiRes, {
     'api 200': (r) => r.status === 200,
@@ -75,8 +77,8 @@ export default function () {
   });
   errorRate.add(!ok);
 
-  // 3. Validación opcional de versión exacta — útil para garantizar que el
-  //    load test corre sobre la versión NUEVA y no contra una stale.
+  // 3. Verificación opcional de versión — útil para garantizar que el load
+  //    test corre sobre la versión NUEVA y no contra stale.
   if (EXPECTED_VERSION) {
     try {
       const v = JSON.parse(apiRes.body).version;
